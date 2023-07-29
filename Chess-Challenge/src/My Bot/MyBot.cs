@@ -70,11 +70,22 @@ public class MyBot : IChessBot
         if (board.IsInCheckmate()) return 100000 * SideScaleFactor;
 
         int eval = 0;
+
+        // Raw piece values
         PieceList[] pieces = board.GetAllPieceLists();
         for (int i = 0; i < pieces.Length / 2; i++)
             eval += PIECE_VALUES[i] * (pieces[i].Count - pieces[i + 6].Count);
-        
-        return SideScaleFactor * eval;
+
+        // Mobility
+        int mobility = 0;
+        if (board.TrySkipTurn())
+        {
+            mobility -= board.GetLegalMoves().Length;
+            board.UndoSkipTurn();
+            mobility += board.GetLegalMoves().Length;
+        }
+
+        return SideScaleFactor * (eval + 10*mobility);
     }
 
     int SideScaleFactor => (board.IsWhiteToMove ? 1 : -1);
