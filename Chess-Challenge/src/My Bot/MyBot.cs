@@ -17,14 +17,13 @@ public class MyBot : IChessBot
         timer = _timer;
 
         bestMove = Move.NullMove;
-        int max = -99999;
-
+        int max = -100000;
+        
         foreach (var move in board.GetLegalMoves())
         {
             board.MakeMove(move);
-            int score = -Search(3);
+            int score = -Search(max, -max, 4);
             board.UndoMove(move);
-
             if (score > max)
             {
                 bestMove = move;
@@ -32,40 +31,51 @@ public class MyBot : IChessBot
             }
         }
 
+        Console.WriteLine($"Best {bestMove}, eval: {max}");
+
         return bestMove;
     }
 
-    int Search(int depth)
+    int Search(int alpha, int beta, int depth)
     {
-        if (depth == 0) return Evaluate();
+        bool qsearch = depth <= 0;
+        Move[] moves = board.GetLegalMoves(qsearch);
+        if (moves.Length == 0) return board.IsInCheck() ? -99999 : 0;
 
-        int max = -99999;
-        foreach (Move move in board.GetLegalMoves())
+        if (qsearch)
+        {
+            int stand_pat = Evaluate();
+            if (stand_pat >= beta)
+                return beta;
+            if (alpha < stand_pat)
+                alpha = stand_pat;
+        }
+        
+        foreach (Move move in moves)
         {
             board.MakeMove(move);
-            int score = -Search(depth - 1);
+            int score = -Search(-beta, -alpha, depth - 1);
             board.UndoMove(move);
-            if (score > max)
-            {
-                max = score;
-            }
+            if (score >= beta)
+                return beta;
+            if (score > alpha)
+                alpha = score;
         }
-        return max;
+        return alpha;
     }
 
     int Evaluate()
     {
-        int sideScaleFactor = (board.IsWhiteToMove ? 1 : -1);
         if (board.IsDraw()) return 0;
-        if (board.IsInCheckmate()) return 100000 * sideScaleFactor;
+        if (board.IsInCheckmate()) return 100000 * SideScaleFactor;
 
         int eval = 0;
         PieceList[] pieces = board.GetAllPieceLists();
         for (int i = 0; i < pieces.Length / 2; i++)
-        {
             eval += PIECE_VALUES[i] * (pieces[i].Count - pieces[i + 6].Count);
-        }
         
-        return sideScaleFactor * eval;
+        return SideScaleFactor * eval;
     }
+
+    int SideScaleFactor => (board.IsWhiteToMove ? 1 : -1);
 }
