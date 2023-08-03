@@ -17,21 +17,31 @@ public class MyBot : IChessBot
                                             68369566912511282590874449920m, 72396532057599326246617936384m, 75186737388538008131054524416m, 77027917484951889231108827392m, 73655004947793353634062267392m, 76417372019396591550492896512m, 74568981255592060493492515584m, 70529879645288096380279255040m};
 
     private int[][] UnpackedPestoTables = new int[64][];
+    private const sbyte EXACT = 0, LOWERBOUND = 1, UPPERBOUND = 2, INVALID = 3;
+
+    public struct Transposition
+    {
+        public Move move;
+        public ulong zobristHash;
+        public int evaluation;
+        public int depth;
+        public sbyte flag;
+    }
+
+    static ulong TpMask = 0x7FFFFF; // 4.7 Million entries
+    private Transposition[] transpositionTable = new Transposition[TpMask + 1];
 
     bool init = true;
 
     private int GetSquareBonus(int file, int rank, int type, bool isWhite)
     {
-        if (isWhite) rank = 7 - rank;
-        return UnpackedPestoTables[rank * 8 + file][type];
+        return UnpackedPestoTables[(isWhite ? rank : 7 - rank) * 8 + file][type];
     }
 
     Board board;
     Timer timer;
 
     Move bestMove;
-
-    bool debug = false;
     public Move Think(Board _board, Timer _timer)
     {
         if (init)
@@ -51,14 +61,12 @@ public class MyBot : IChessBot
         timer = _timer;
 
         bestMove = Move.NullMove;
-        int max = -10000;
+        int max = -100000;
         
         foreach (var move in board.GetLegalMoves())
         {
             board.MakeMove(move);
             int score = -Search(-100000, 100000, 3);
-            Evaluate(debug);
-            if (debug) Console.WriteLine($"Score: {score}, Max: {max}");
             board.UndoMove(move);
             if (score > max)
             {
@@ -67,13 +75,23 @@ public class MyBot : IChessBot
             }
         }
 
+#if DEBUG
         Console.WriteLine($"Best {bestMove}, eval: {max}");
+#endif
 
         return bestMove;
     }
 
     int Search(int alpha, int beta, int depth)
     {
+        ref Transposition transposition = ref transpositionTable[board.ZobristKey & TpMask];
+
+        if (transposition.zobristHash == board.ZobristKey && transposition.depth >= depth &&
+            (transposition.flag == EXACT ||
+            transposition.flag == LOWERBOUND && transposition.evaluation >= beta ||
+            transposition.flag == UPPERBOUND && transposition.evaluation <= alpha))
+            return transposition.evaluation;
+
         bool qsearch = depth <= 0;
         Move[] moves = board.GetLegalMoves(qsearch);
         if (moves.Length == 0) return board.IsInCheck() ? -99999 : 0;
@@ -89,6 +107,9 @@ public class MyBot : IChessBot
                 alpha = stand_pat;
         }
 
+        Move bestMove = Move.NullMove;
+        int startingAlpha = alpha;
+
         foreach (Move move in moves)
         {
             board.MakeMove(move);
@@ -97,20 +118,39 @@ public class MyBot : IChessBot
             if (score >= beta)
                 return beta;
             if (score > alpha)
+            {
                 alpha = score;
+                bestMove = move;
+            }
+                
         }
+
+        if (!qsearch)
+        {
+            transposition.evaluation = alpha;
+            transposition.zobristHash = board.ZobristKey;
+            transposition.move = bestMove;
+            if (alpha < startingAlpha)
+                transposition.flag = UPPERBOUND;
+            else if (alpha >= beta)
+                transposition.flag = LOWERBOUND;
+            else 
+                transposition.flag = EXACT;
+            transposition.depth = depth;
+        }
+
         return alpha;
     }
 
-    int Evaluate(bool debug = false)
+    int Evaluate()
     {
         if (board.IsDraw()) return 0;
         if (board.IsInCheckmate()) return 100000 * SideScaleFactor;
 
         int eval = 0;
+        PieceList[] pieces = board.GetAllPieceLists();
 
         // Raw piece values
-        PieceList[] pieces = board.GetAllPieceLists();
         for (int i = 0; i < pieces.Length / 2; i++)
             eval += PIECE_VALUES[i] * (pieces[i].Count - pieces[i + 6].Count);
 
@@ -159,12 +199,11 @@ public class MyBot : IChessBot
         }
 
         int pestoEval = ((middlegame * (256 - phase)) + (endgame * phase)) / 256;
-        if (debug)
-        {
-            Console.WriteLine($"PeSTO: {pestoEval}, Middle game: {middlegame}, end: {endgame}");
-            Console.WriteLine($"Mobility: {mobility}, Eval: {eval}");
-            Console.WriteLine($"Total: {SideScaleFactor * (mobility + pestoEval + eval)}");
-        }
+#if DEBUG
+        Console.WriteLine($"PeSTO: {pestoEval}, Middle game: {middlegame}, end: {endgame}");
+        Console.WriteLine($"Mobility: {mobility}, Eval: {eval}");
+        Console.WriteLine($"Total: {SideScaleFactor * (mobility + pestoEval + eval)}");
+#endif
 
         return SideScaleFactor * (mobility + pestoEval + eval);
     }
