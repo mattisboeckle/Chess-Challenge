@@ -1,11 +1,15 @@
-﻿using ChessChallenge.API;
+﻿#define DEBUG
+//#define EVAL_DEBUG
+//#define DEBUG_PV
+
+using ChessChallenge.API;
 using System;
 using System.Linq;
 using System.Data;
 
 public class MyBot : IChessBot
 {                                         // Middlegame                // Endgame
-    static readonly int[] PIECE_VALUES = { 82, 337, 365, 477, 1025, 0, 94, 281, 297, 512, 936, 0};
+    static readonly int[] PIECE_VALUES = { 82, 337, 365, 477, 1025, 0, 94, 281, 297, 512, 936, 0 };
     static readonly int[] PIECE_PHASE = { 0, 1, 1, 2, 4 };
     static readonly decimal[] PIECE_TABLE = {63746705523041458768562654720m, 71818693703096985528394040064m, 75532537544690978830456252672m, 75536154932036771593352371712m, 76774085526445040292133284352m, 3110608541636285947269332480m, 936945638387574698250991104m, 75531285965747665584902616832m,
                                             77047302762000299964198997571m, 3730792265775293618620982364m, 3121489077029470166123295018m, 3747712412930601838683035969m, 3763381335243474116535455791m, 8067176012614548496052660822m, 4977175895537975520060507415m, 2475894077091727551177487608m,
@@ -17,7 +21,6 @@ public class MyBot : IChessBot
                                             68369566912511282590874449920m, 72396532057599326246617936384m, 75186737388538008131054524416m, 77027917484951889231108827392m, 73655004947793353634062267392m, 76417372019396591550492896512m, 74568981255592060493492515584m, 70529879645288096380279255040m};
 
     private int[][] UnpackedPestoTables = new int[64][];
-    private const sbyte EXACT = 0, LOWERBOUND = 1, UPPERBOUND = 2, INVALID = 3;
 
     public struct Transposition
     {
@@ -25,7 +28,6 @@ public class MyBot : IChessBot
         public ulong zobristHash;
         public int evaluation;
         public int depth;
-        public sbyte flag;
     }
 
     static ulong TpMask = 0x7FFFFF; // 4.7 Million entries
@@ -42,6 +44,7 @@ public class MyBot : IChessBot
     Timer timer;
 
     Move bestMove;
+    int bestEvaluation;
     public Move Think(Board _board, Timer _timer)
     {
         if (init)
@@ -60,89 +63,99 @@ public class MyBot : IChessBot
         board = _board;
         timer = _timer;
 
-        bestMove = Move.NullMove;
-        int max = -100000;
-        
-        foreach (var move in board.GetLegalMoves())
+        int searchDepth = 1;
+
+        for (; ++searchDepth < 64;)
         {
-            board.MakeMove(move);
-            int score = -Search(-100000, 100000, 3);
-            board.UndoMove(move);
-            if (score > max)
-            {
-                bestMove = move;
-                max = score;
-            }
+            bestMove = Move.NullMove;
+            Search(-100000, 100000, searchDepth, 0);
+#if DEBUG_PV
+            PrintPV(searchDepth);
+#endif
+            if (TimerElapsed) break;
         }
 
 #if DEBUG
-        Console.WriteLine($"Best {bestMove}, eval: {max}");
+        Console.WriteLine($"Best {bestMove}, eval: {bestEvaluation}, iteration depth: {searchDepth}");
 #endif
 
         return bestMove;
     }
 
-    int Search(int alpha, int beta, int depth)
-    {
-        ref Transposition transposition = ref transpositionTable[board.ZobristKey & TpMask];
+    //bool TimerElapsed => timer.MillisecondsElapsedThisTurn > timer.MillisecondsRemaining / 20;
+    bool TimerElapsed => timer.MillisecondsElapsedThisTurn > 100 && bestMove != Move.NullMove;
 
-        if (transposition.zobristHash == board.ZobristKey && transposition.depth >= depth &&
-            (transposition.flag == EXACT ||
-            transposition.flag == LOWERBOUND && transposition.evaluation >= beta ||
-            transposition.flag == UPPERBOUND && transposition.evaluation <= alpha))
-            return transposition.evaluation;
+    int Search(int alpha, int beta, int depth, int plyFromRoot)
+    {
+        if (TimerElapsed) return 0;
 
         bool qsearch = depth <= 0;
-        Move[] moves = board.GetLegalMoves(qsearch);
-        if (moves.Length == 0) return board.IsInCheck() ? -99999 : 0;
+        bool isRoot = plyFromRoot == 0;
 
-        if (depth < -3) return Evaluate();
+        if (!isRoot)
+        {
+            if (board.IsRepeatedPosition()) return 0;
+
+            alpha = Math.Max(alpha,  plyFromRoot - 100000);
+            beta = Math.Min(beta, 100000 - plyFromRoot);
+            if (alpha >= beta)
+                return alpha;
+        }
+
+        ref Transposition transposition = ref transpositionTable[board.ZobristKey & TpMask];
+
+        if (transposition.zobristHash == board.ZobristKey && transposition.depth >= depth)
+        {
+            if (isRoot)
+            {
+                bestMove = transposition.move;
+                bestEvaluation = transposition.evaluation;
+            }
+            return transposition.evaluation;
+        }
 
         if (qsearch)
         {
             int stand_pat = Evaluate();
             if (stand_pat >= beta)
                 return beta;
-            if (alpha < stand_pat)
-                alpha = stand_pat;
+            alpha = Math.Max(alpha, stand_pat);
         }
 
-        Move bestMove = Move.NullMove;
-        int startingAlpha = alpha;
+        Move bestMoveThisIteration = Move.NullMove;
+        Move[] moves = board.GetLegalMoves(qsearch);
+        if (moves.Length == 0) return board.IsInCheck() ? plyFromRoot - 100000 : 0;
 
         foreach (Move move in moves)
         {
+            if (TimerElapsed) return 0;
             board.MakeMove(move);
-            int score = -Search(-beta, -alpha, depth - 1);
+            int score = -Search(-beta, -alpha, depth - 1, plyFromRoot + 1);
             board.UndoMove(move);
             if (score >= beta)
                 return beta;
             if (score > alpha)
             {
                 alpha = score;
-                bestMove = move;
+                bestMoveThisIteration = move;
             }
-                
         }
 
-        if (!qsearch)
+        transposition.evaluation = alpha;
+        transposition.zobristHash = board.ZobristKey;
+        transposition.move = bestMoveThisIteration;
+        transposition.depth = depth;
+
+        if (isRoot)
         {
-            transposition.evaluation = alpha;
-            transposition.zobristHash = board.ZobristKey;
-            transposition.move = bestMove;
-            if (alpha < startingAlpha)
-                transposition.flag = UPPERBOUND;
-            else if (alpha >= beta)
-                transposition.flag = LOWERBOUND;
-            else 
-                transposition.flag = EXACT;
-            transposition.depth = depth;
+            bestMove = transposition.move;
+            bestEvaluation = transposition.evaluation;
         }
 
         return alpha;
     }
 
-    int Evaluate()
+    int Evaluate(bool debug = false)
     {
         if (board.IsDraw()) return 0;
         if (board.IsInCheckmate()) return 100000 * SideScaleFactor;
@@ -199,14 +212,42 @@ public class MyBot : IChessBot
         }
 
         int pestoEval = ((middlegame * (256 - phase)) + (endgame * phase)) / 256;
-#if DEBUG
-        Console.WriteLine($"PeSTO: {pestoEval}, Middle game: {middlegame}, end: {endgame}");
-        Console.WriteLine($"Mobility: {mobility}, Eval: {eval}");
-        Console.WriteLine($"Total: {SideScaleFactor * (mobility + pestoEval + eval)}");
+#if EVAL_DEBUG
+        if (debug)
+        {
+            Console.WriteLine($"PeSTO: {pestoEval}, Middle game: {middlegame}, end: {endgame}");
+            Console.WriteLine($"Mobility: {mobility}, Eval: {eval}");
+            Console.WriteLine($"Total: {SideScaleFactor * (mobility + pestoEval + eval)}");
+        }
 #endif
 
         return SideScaleFactor * (mobility + pestoEval + eval);
     }
+
+#if DEBUG_PV
+    private void PrintPV(int depth)
+    {
+        Move[] pv = new Move[128];
+        var entry = transpositionTable[board.ZobristKey & TpMask];
+        var legalMoves = board.GetLegalMoves();
+        int i = 0;
+        for (; legalMoves.Contains(entry.move) && i < 128; i++)
+        {
+            pv[i] = entry.move;
+            Console.Write(entry.move + " ");
+            board.MakeMove(entry.move);
+            legalMoves = board.GetLegalMoves();
+            entry = transpositionTable[board.ZobristKey & TpMask];
+        }
+        Console.WriteLine("");
+        Console.WriteLine("MyBot depth " + depth + " score " + entry.evaluation);
+        for (int j = i; j >= 0; j--)
+        {
+            board.UndoMove(pv[j]);
+        }
+        Console.WriteLine("");
+    }
+#endif
 
     int SideScaleFactor => (board.IsWhiteToMove ? 1 : -1);
 }
